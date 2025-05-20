@@ -37,7 +37,7 @@
 <h3 align="center">PEDSnet DCC Tool v2</h3>
 
   <p align="center">
-    PEDSnet DCC Tool v2 is the reincarnation of the [original PEDSnet DCC Tool](https://github.com/PEDSnet/pedsnetdcc), refactored and modernized for efficiency.
+    PEDSnet DCC Tool v2 is the reincarnation of the original <a href ="https://github.com/PEDSnet/pedsnetdcc">PEDSnet DCC Tool</a>, refactored and modernized for efficiency.
     <br />
     <a href="https://github.com/PEDSnet/pedsnetdcc_v2"><strong>Explore the docs »</strong></a>
     <br />
