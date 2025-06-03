@@ -1,0 +1,42 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+    {
+        "name": "Electron Main",
+        "program": "${workspaceFolder}/main.js",
+        "request": "launch",
+        "runtimeExecutable": "electron",
+        "skipFiles": [
+            "<node_internals>/**"
+        ],
+        "type": "node"
+    },
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "python": "${workspaceFolder}/z-score/venv/bin/python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--pg-host", "pedspbd02.research.chop.edu",
+                "--pg-database", "pedsnet_dcc_v58",
+                "--site", "seattle",
+                "--pg-user", "seyediana1",
+                "--pg-password", "${input:pgPassword}"
+            ]
+        }
+    ],
+    "inputs": [
+        {
+            "type": "promptString",
+            "id": "pgPassword",
+            "description": "Enter your PostgreSQL password",
+            "password": true
+        }
+    ]
+}

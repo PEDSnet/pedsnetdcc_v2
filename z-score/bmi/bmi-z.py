@@ -1,6 +1,10 @@
+import time
+import uuid
 import ibis
 import numpy as np
 from data.tables import weight_for_age_male_df, weight_for_age_female_df
+import pandas as pd
+pd.options.mode.copy_on_write = True 
 
 from airflow.decorators import task
 from contextlib import closing
@@ -57,81 +61,106 @@ def run_cleanup_steps(con, write_database: str, write_table: str) -> None:
         pass
     
     table = con.table(write_table, database=write_database)
-    overflow_condition = table.value_as_number.abs().round() > 1e15
-    table.filter(~overflow_condition).to_table(write_table, database=write_database, overwrite=True)
+    table = table.filter([
+        ~table.value_as_number.abs().round() > 1e15, 
+        ~table.value_as_number.isnull(), 
+        ~table.value_as_number.isnan()
+        ]
+    )
     
     with closing(con.raw_sql(BMIZ_DEFAULT_VALUE_AS_NUMBER.format(write_database, write_table))):
         pass
     
-    table = con.table(write_table, database=write_database)
     nan_condition = table.value_as_number.isnan()
-    table.filter(~nan_condition).to_table(write_table, database=write_database, overwrite=True)
+    table.filter(~nan_condition)
     print("Cleanup steps completed.")
 
 
-def create_lms_tables(con, write_database: str, dry_run: bool = False):
+def generate_temp_name(base_name: str, site: str) -> str:
+    """Generate a unique temporary table name with site and timestamp."""
+    process = "bmi_z_score"
+    timestamp = str(int(time.time()))
+    unique_id = str(uuid.uuid4())[:8]  # Short unique identifier
+    return f"{process}_{base_name}_{site}_{timestamp}_{unique_id}"
+
+def create_lms_tables(con, site: str, dry_run: bool = False):
     """
-    Create temporary LMS tables in the database from hardcoded data.
+    Create temporary LMS tables using temp=True without specifying database/schema.
+    PostgreSQL will automatically place them in the temporary schema.
     
     Returns:
         tuple: (female_temp_name, male_temp_name) if not dry_run, else (None, None)
     """
-    print(f"{'DRY RUN: ' if dry_run else ''}Creating temporary LMS tables in database...")
+    print(f"{'DRY RUN: ' if dry_run else ''}Creating temporary LMS tables...")
     
     # Load hardcoded LMS tables
     female = weight_for_age_female_df.copy()
     male = weight_for_age_male_df.copy()
     
-    # Create temporary tables in database
-    female_temp = "temp_female_lms"
-    male_temp = "temp_male_lms"
+    # Create unique temporary table names
+    female_temp = generate_temp_name("female_lms", site)
+    male_temp = generate_temp_name("male_lms", site)
     
     if not dry_run:
-        # Drop existing temp tables if they exist
-        for temp_table in [female_temp, male_temp]:
-            if temp_table in con.list_tables(database=write_database):
-                con.drop_table(temp_table, database=write_database)
-        
-        # Create temp tables with gender column
+        # Create temp tables with gender column - NO database parameter for temp tables
         female_with_gender = female.copy()
         female_with_gender['gender'] = 'female'
         male_with_gender = male.copy()
         male_with_gender['gender'] = 'male'
         
-        con.create_table(female_temp, obj=female_with_gender, database=write_database)
-        con.create_table(male_temp, obj=male_with_gender, database=write_database)
+        # Create temporary tables with temp=True and NO database parameter
+        con.create_table(female_temp, obj=female_with_gender, temp=True)
+        con.create_table(male_temp, obj=male_with_gender, temp=True)
         
+        print(f"Created temporary LMS tables: {female_temp}, {male_temp}")
         return female_temp, male_temp
     else:
         print(f"DRY RUN: Would create temporary tables {female_temp} and {male_temp}")
         return None, None
 
-def perform_lms_lookup(con, meas_table, female_temp: str, male_temp: str, write_database: str):
+def perform_lms_lookup(con, meas_table, female_temp: str, male_temp: str, site: str, **kwargs):
     """
     Perform LMS parameter lookup using SQL strings for complex operations.
-    This approach avoids ambiguous field references by using explicit SQL.
+    Uses temporary tables with temp=True (no database parameter).
     """
     print("Performing LMS lookup and interpolation...")
     
-    # First, create a temporary table with the measurement data
-    temp_meas_name = "temp_meas_with_lms"
+    # Create unique temporary table name
+    temp_meas_name = generate_temp_name("meas_with_lms", site)
     
     # Execute the meas_table query and create temp table
     print("Creating temporary measurement table...")
-    meas_data = meas_table.execute()
-    con.create_table(temp_meas_name, obj=meas_data, database=write_database, overwrite=True)
+    # Check if we should load from cache or save to cache
+    cache_file = kwargs.get('cache_file', f"cache/meas_data_{site}.parquet")
     
-    # Use SQL to perform the complex LMS lookup operations
-    print("Finding LMS parameters using SQL...")
+    if cache_file and os.path.exists(cache_file):
+        print(f"Loading cached measurement data from {cache_file}...")
+        meas_data = pd.read_parquet(cache_file)
+        print(f"Loaded {len(meas_data)} cached measurement records")
+    else:
+        print("Executing measurement query...")
+        meas_data = meas_table.execute()
+        
+        # Save to cache if cache_file is specified and we're running from __main__
+        if cache_file and __name__ == "__main__":
+            print(f"Saving measurement data to cache file {cache_file}...")
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            meas_data.to_parquet(cache_file, index=False)
+            print(f"Cached {len(meas_data)} measurement records to {cache_file}")
     
-    # Create the LMS lookup query using SQL
+    print(f"Creating temporary measurement table: {temp_meas_name}")
+    # Create temporary table with temp=True and NO database parameter
+    con.create_table(temp_meas_name, obj=meas_data, temp=True)
+    
+    # For temporary tables, PostgreSQL places them in pg_temp schema
+    # We can reference them without schema qualification in SQL
     lms_lookup_sql = f"""
     WITH lms_union AS (
         SELECT age, lambda as l, mean as m, sigma as s, gender 
-        FROM {write_database}.{female_temp}
+        FROM {female_temp}
         UNION ALL
         SELECT age, lambda as l, mean as m, sigma as s, gender 
-        FROM {write_database}.{male_temp}
+        FROM {male_temp}
     ),
     meas_with_bounds AS (
         SELECT 
@@ -146,7 +175,7 @@ def perform_lms_lookup(con, meas_table, female_temp: str, male_temp: str, write_
              FROM lms_union lms 
              WHERE lms.gender = tm.gender 
                AND lms.age >= tm.age_in_months) as upper_age
-        FROM {write_database}.{temp_meas_name} tm
+        FROM {temp_meas_name} tm
     ),
     meas_with_lms AS (
         SELECT 
@@ -203,16 +232,17 @@ def perform_lms_lookup(con, meas_table, female_temp: str, male_temp: str, write_
     SELECT * FROM interpolated
     """
     
+    print("Executing LMS lookup SQL query... This might take a moment.")
     # Execute the SQL and get result as Ibis table
-    result_table = con.sql(lms_lookup_sql)
-    
-    # Clean up the temporary measurement table
-    con.drop_table(temp_meas_name, database=write_database)
+    result_table = con.sql(lms_lookup_sql, dialect="postgres")
+    print("LMS lookup SQL query executed successfully.")
     
     print("LMS lookup and interpolation completed.")
-    return result_table
+    
+    # Return both the result table AND the temp table name for cleanup later
+    return result_table, temp_meas_name
 
-def calculate_z_scores(meas_with_lms):
+def calculate_z_scores(meas_with_lms, **kwargs):
     """
     Calculate Z-scores using the LMS method.
     
@@ -225,43 +255,84 @@ def calculate_z_scores(meas_with_lms):
     print("Computing Z-scores with LMS method...")
     
     # Calculate Z-scores using LMS method
+    start_time = time.time()
+    print("Starting Z-score calculation...")
+    
+    # Unpack the tuple from perform_lms_lookup
+    result_table, temp_meas_name = meas_with_lms
+    
     z_score_expr = ibis.cases(
         # If lambda != 0, use standard LMS formula
-        (meas_with_lms.l != 0, 
-         ((meas_with_lms.bmi_value / meas_with_lms.m) ** meas_with_lms.l - 1) / (meas_with_lms.l * meas_with_lms.s)),
-        # If lambda == 0, use log formula
-        else_=(meas_with_lms.bmi_value / meas_with_lms.m).log() / meas_with_lms.s
+        (result_table.l != 0, 
+         ((result_table.bmi_value / result_table.m) ** result_table.l - 1) / (result_table.l * result_table.s)),
+        else_=(result_table.bmi_value / result_table.m).log() / result_table.s
     )
 
+    # First, create the table with the z_score column
+    with_z_score = result_table.mutate(z_score=z_score_expr)
+    
+    # Then filter using the newly created table that HAS the z_score column
     result = (
-        meas_with_lms
-        .mutate(z_score=z_score_expr)
+        with_z_score
         .filter([
-            meas_with_lms.bmi_value > 0, 
-            meas_with_lms.m > 0, 
-            meas_with_lms.s > 0,
-            meas_with_lms.z_score.notnull(),
-            meas_with_lms.z_score.abs() <= 1e15
+            with_z_score.bmi_value > 0, 
+            with_z_score.m > 0, 
+            with_z_score.s > 0,
+            with_z_score.z_score.notnull(),
+            with_z_score.z_score.abs() <= 1e15
         ])
     )
     
-    return result
+    # Execute the query to get results
+    print("Executing Z-score calculation...")
+    # Check if we should load from cache or save to cache
+    cache_file = kwargs.get('cache_file', f"cache/bmi_z_scores_{site}.parquet")
+    
+    if cache_file and os.path.exists(cache_file):
+        print(f"Loading cached results from {cache_file}...")
+        df = pd.read_parquet(cache_file)
+        print(f"Loaded {len(df)} cached Z-score records")
+    else:
+        print("Executing Z-score calculation...")
+        df = result.execute()
+        
+        # Save to cache if cache_file is specified
+        if cache_file:
+            print(f"Saving results to cache file {cache_file}...")
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            df.to_parquet(cache_file, index=False)
+            print(f"Cached {len(df)} records to {cache_file}")
+    
+    # Calculate and display computation time
+    end_time = time.time()
+    total_seconds = end_time - start_time
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    seconds = total_seconds % 60
+    
+    print(f"Z-score calculation completed in {hours:02d}:{minutes:02d}:{seconds:06.3f}")
+    print(f"Calculated {len(df)} valid Z-scores")
+    
+    return df
 
 
-def cleanup_lms_tables(con, female_temp: str, male_temp: str, write_database: str, dry_run: bool = False):
+def cleanup_lms_tables(con, female_temp: str, male_temp: str, dry_run: bool = False):
     """
-    Clean up temporary LMS tables.
+    Clean up temporary LMS tables. Since they use temp=True, this is mostly for explicit cleanup.
     """
     if not dry_run and female_temp and male_temp:
         print("Cleaning up temporary LMS tables...")
         for temp_table in [female_temp, male_temp]:
-            if temp_table in con.list_tables(database=write_database):
-                con.drop_table(temp_table, database=write_database)
+            try:
+                # Drop temp tables without database parameter
+                con.drop_table(temp_table)
+                print(f"  Dropped temporary table: {temp_table}")
+            except Exception as e:
+                print(f"  Note: Could not drop {temp_table} (may have been auto-dropped): {e}")
+                
     elif dry_run:
         print(f"DRY RUN: Would drop temporary tables {female_temp} and {male_temp}")
 
-
-@task.external_python(task_id="compute_bmi_zscore", python="../z-score_venv/bin/python")
 def compute_bmi_zscore(**kwargs):
     compute_bmi_zscore_main(**kwargs)
     
@@ -286,21 +357,13 @@ def compute_bmi_zscore_main(
 ) -> None:
     """
     Connects to Postgres or Trino via Ibis and computes BMI-for-age Z-scores.
-
-    If skip_calc is True, runs only post-processing cleanup. Otherwise proceeds
-    through full calculation, insertion, then cleanup.
-    
-    Args:
-        dry_run: If True, performs all operations except table creation and data insertion
-        db_backend: Either "postgres" or "trino"
-        trino_catalog: Required if db_backend is "trino"
-        trino_schema: Required if db_backend is "trino"
+    Uses temporary tables with temp=True for PostgreSQL compatibility.
     """
     
     read_database = f"{site}_pedsnet"
     write_database = read_database
     
-    # 1) Establish Ibis connection based on backend
+    # 1) Establish Ibis connection
     if db_backend.lower() == "trino":
         if not trino_catalog or not trino_schema:
             raise ValueError("trino_catalog and trino_schema are required when using Trino backend")
@@ -324,13 +387,14 @@ def compute_bmi_zscore_main(
 
     # Immediately elevate with proper cursor management:
     with closing(con.raw_sql(f"SET ROLE {role}")):
-        pass  # DDL statement, cursor closed automatically
+        pass
 
-    # 2) Prepare write table (skip if dry run)
+    # 2) Drop and recreate write table for idempotence (skip if dry run)
     if not dry_run:
+        print(f"Ensuring idempotence: recreating {write_database}.{write_table}")
         create_write_table(con, read_table, write_table, write_database)
     else:
-        print(f"DRY RUN: Would create table {write_database}.{write_table} like {read_database}.{read_table}")
+        print(f"DRY RUN: Would recreate table {write_database}.{write_table} like {read_database}.{read_table}")
 
     # 3) If skip_calc, cleanup and return
     if skip_calc:
@@ -341,16 +405,15 @@ def compute_bmi_zscore_main(
         print(f"skip_calc=True: {'would create and clean' if dry_run else 'created and cleaned'} {write_database}.{write_table}")
         return
 
-    # 4) Create temporary LMS tables in database from hardcoded data
-    female_temp, male_temp = create_lms_tables(con, write_database, dry_run)
+    # 4) Create temporary LMS tables
+    female_temp, male_temp = create_lms_tables(con, site, dry_run)
 
-    # 5) Build Ibis expressions for BMI Z-score calculation
+    # 5) Build measurement query
     print(f"{'DRY RUN: ' if dry_run else ''}Building BMI measurement query...")
     
     m = con.table(read_table, database=read_database)
     p = con.table("person", database=read_database)
 
-    # Base measurement + age + gender calculation
     meas = (
         m
         .filter([
@@ -381,131 +444,93 @@ def compute_bmi_zscore_main(
     )
 
     if not dry_run:
-        # 6) Perform LMS lookup and interpolation
-        meas_with_lms = perform_lms_lookup(con, meas, female_temp, male_temp, write_database)
+        # 6) Perform LMS lookup and Z-score calculation
+        meas_with_lms = perform_lms_lookup(con, meas, female_temp, male_temp, site)
+        df = calculate_z_scores(meas_with_lms, site = site)
         
-        # 7) Calculate Z-scores
-        result = calculate_z_scores(meas_with_lms)
-
-        # Execute the query to get results
-        print("Executing Z-score calculation...")
-        df = result.execute()
-        print(f"Calculated {len(df)} valid Z-scores")
-
         # Clean up temporary tables
-        cleanup_lms_tables(con, female_temp, male_temp, write_database, dry_run)
+        cleanup_lms_tables(con, female_temp, male_temp, dry_run)
 
     else:
-        print("DRY RUN: Would execute Z-score calculation with Ibis")
-        # For dry run, just execute the measurement query to show what would be processed
+        print("DRY RUN: Would execute Z-score calculation")
         df_sample = meas.limit(100).execute()
-        print(f"DRY RUN: Would process approximately {len(df_sample)} records (showing sample of 100)")
-        df = df_sample  # Use sample for rest of dry run logic
-        cleanup_lms_tables(con, female_temp, male_temp, write_database, dry_run)
+        print(f"DRY RUN: Would process approximately {len(df_sample)} records")
+        df = df_sample
+        cleanup_lms_tables(con, female_temp, male_temp, dry_run)
 
-    # 8) Print comprehensive statistics
-    if not dry_run:
-        # Get original count for comparison
+    # 7) Print statistics
+    if not dry_run and len(df) > 0:
         original_count = meas.count().execute()
         filtered_count = len(df)
         
         print("\n" + "="*60)
-        print("IBIS DATABASE Z-SCORE CALCULATION SUMMARY")
+        print("BMI Z-SCORE CALCULATION SUMMARY")
         print("="*60)
-        
+        print(f"Site: {site}")
         print(f"Total BMI records found: {original_count:,}")
         print(f"Valid Z-scores calculated: {filtered_count:,}")
-        print(f"Invalid/filtered Z-scores: {original_count - filtered_count:,}")
         print(f"Success rate: {(filtered_count/original_count)*100:.1f}%")
         
-        if filtered_count > 0:
+        if 'z_score' in df.columns:
             z_scores = df['z_score']
             print(f"\nZ-score distribution:")
             print(f"  Min: {z_scores.min():.3f}")
             print(f"  Max: {z_scores.max():.3f}")
             print(f"  Mean: {z_scores.mean():.3f}")
             print(f"  Median: {z_scores.median():.3f}")
-            print(f"  Std Dev: {z_scores.std():.3f}")
-            print(f"  25th percentile: {z_scores.quantile(0.25):.3f}")
-            print(f"  75th percentile: {z_scores.quantile(0.75):.3f}")
-            
-            # Flag extreme Z-scores
-            extreme_low = np.sum(z_scores < -5)
-            extreme_high = np.sum(z_scores > 5)
-            if extreme_low > 0 or extreme_high > 0:
-                print(f"\nExtreme Z-scores (may indicate data issues):")
-                if extreme_low > 0:
-                    print(f"  Z < -5: {extreme_low:,} records")
-                if extreme_high > 0:
-                    print(f"  Z > 5: {extreme_high:,} records")
-        
         print("="*60)
 
-    # 9) Idempotent delete via Ibis anti-join if needed
-    if not df.empty:
-        if not dry_run:
-            print("Deleting existing Z-score records for idempotence...")
-            temp_df = df[['person_id','measurement_datetime']]
-            temp_name = f"temp_del_{write_table}"
-            con.create_table(temp_name, database=write_database, obj=temp_df, overwrite=True)
-            targ = con.table(write_table, database=write_database)
-            tmp = con.table(temp_name, database=write_database)
-            keep = ~(
-                (targ.measurement_concept_id == zscore_concept_id) &
-                (targ.measurement_type_concept_id == 45754907) &
-                targ.person_id.isin(tmp.person_id) &
-                targ.measurement_datetime.isin(tmp.measurement_datetime)
-            )
-            targ.filter(keep).to_table(write_table, database=write_database, overwrite=True)
-            con.drop_table(temp_name, database=write_database)
-            print(f"Deleted existing Z-score records for {len(df)} measurements")
+    # 8) Prepare and insert new rows (no idempotent deletion needed since table was recreated)
+    if len(df) > 0:
+        df_insert = df.copy()
+        # df_insert['measurement_id'] = None
+        df_insert['measurement_concept_id'] = zscore_concept_id
+        df_insert['measurement_date'] = df_insert.measurement_datetime.dt.date
+        df_insert['measurement_type_concept_id'] = 45754907
+        # df_insert['unit_concept_id'] = 0
+        df_insert['unit_source_value'] = 'SD'
+        
+        if 'z_score' in df_insert.columns:
+            df_insert['value_as_number'] = df_insert['z_score']
         else:
-            print(f"DRY RUN: Would delete existing Z-score records for {len(df)} measurements")
+            df_insert['value_as_number'] = 0.0  # Placeholder for dry run
+            
+        df_insert['value_source_value'] = (
+            'measurement: ' + 
+            df_insert.bmi_source_value.fillna('').astype(str)
+        )
+        df_insert['measurement_source_value'] = f"PEDSnet NHANES 2000 Z score computation {version}"
+        # df_insert['measurement_source_concept_id'] = 0
+        df_insert = df_insert.rename(columns={'age_in_months':'measurement_age_in_months'})
+        
+        cols = [
+            'measurement_id','person_id','measurement_concept_id','measurement_date',
+            'measurement_datetime','measurement_type_concept_id','unit_concept_id',
+            'unit_source_value','value_as_number','value_source_value',
+            'measurement_source_value','measurement_source_concept_id',
+            'measurement_age_in_months','site_id','provider_id','visit_occurrence_id'
+        ]
+        df_insert = df_insert[cols]
+        
+        if not dry_run:
+            start_time = time.time()
+            con.insert(write_table, df_insert, database=write_database)
+            end_time = time.time()
+            total_seconds = end_time - start_time
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            seconds = total_seconds % 60
+            print(f"Inserted {len(df_insert)} new Z-score records in {hours:02d}:{minutes:02d}:{seconds:06.3f}")
+        else:
+            print(f"DRY RUN: Would insert {len(df_insert)} new Z-score records")
 
-    # 10) Prepare & insert new rows
-    df_insert = df.copy()
-    df_insert['measurement_id'] = None
-    df_insert['measurement_concept_id'] = zscore_concept_id
-    df_insert['measurement_date'] = df_insert.measurement_datetime.dt.date
-    df_insert['measurement_type_concept_id'] = 45754907
-    df_insert['unit_concept_id'] = 0
-    df_insert['unit_source_value'] = 'SD'
-    # Handle z_score column for both dry run and actual run
-    if 'z_score' in df_insert.columns:
-        df_insert['value_as_number'] = df_insert['z_score']
-    else:
-        df_insert['value_as_number'] = 0.0  # Placeholder for dry run
-    df_insert['value_source_value'] = (
-        'measurement: ' + df_insert.measurement_id.fillna('').astype(str)
-        + ' ' + df_insert.bmi_source_value.fillna('')
-    )
-    df_insert['measurement_source_value'] = f"PEDSnet NHANES 2000 Z score computation {version}"
-    df_insert['measurement_source_concept_id'] = 0
-    df_insert = df_insert.rename(columns={'age_in_months':'measurement_age_in_months'})
-    cols = [
-        'measurement_id','person_id','measurement_concept_id','measurement_date',
-        'measurement_datetime','measurement_type_concept_id','unit_concept_id',
-        'unit_source_value','value_as_number','value_source_value',
-        'measurement_source_value','measurement_source_concept_id',
-        'measurement_age_in_months','site_id','provider_id','visit_occurrence_id'
-    ]
-    df_insert = df_insert[cols]
-    
-    if not dry_run:
-        con.insert(write_table, df_insert, database=write_database)
-        print(f"Inserted {len(df_insert)} new Z-score records")
-    else:
-        print(f"DRY RUN: Would insert {len(df_insert)} new Z-score records")
-        print("Sample of records that would be inserted:")
-        print(df_insert.head().to_string())
-
-    # 11) Always cleanup (skip if dry run)
+    # 9) Final cleanup steps
     if not dry_run:
         run_cleanup_steps(con, write_database, write_table)
     else:
         print(f"DRY RUN: Would run cleanup steps on {write_database}.{write_table}")
 
-    print(f"{'DRY RUN: Would write' if dry_run else 'Wrote'} and cleaned BMI Z-scores in {write_database}.{write_table}")
+    print(f"{'DRY RUN: Would complete' if dry_run else 'Completed'} BMI Z-score calculation for site {site}")
 
 # CLI entrypoint with support for both Trino and Postgres
 if __name__ == "__main__":
