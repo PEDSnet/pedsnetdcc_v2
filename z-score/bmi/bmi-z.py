@@ -234,10 +234,22 @@ def perform_lms_lookup(con, meas_table, female_temp: str, male_temp: str, site: 
     
     print("Executing LMS lookup SQL query... This might take a moment.")
     # Execute the SQL and get result as Ibis table
+    start_time = time.time()
     result_table = con.sql(lms_lookup_sql, dialect="postgres")
-    print("LMS lookup SQL query executed successfully.")
+    end_time = time.time()
+    
+    query_duration = end_time - start_time
+    hours = int(query_duration // 3600)
+    minutes = int((query_duration % 3600) // 60)
+    seconds = query_duration % 60
+    print(f"LMS lookup SQL query completed in {hours:02d}:{minutes:02d}:{seconds:06.3f}")
+    
+    # print number of records in result_table
+    result_count = result_table.count().execute()
+    print(f"Retrieved {result_count} records with interpolated LMS parameters.")
     
     print("LMS lookup and interpolation completed.")
+    
     
     # Return both the result table AND the temp table name for cleanup later
     return result_table, temp_meas_name
