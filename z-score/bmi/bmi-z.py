@@ -350,10 +350,10 @@ def compute_bmi_zscore_main(
     write_table: str = "measurement_bmiz_new_approach_ibis",
     days_per_month: float = 30.44,
     skip_calc: bool = False,
-    dry_run: bool = False,
     db_backend: str = "postgres",
-    trino_catalog: str = None,
-    trino_schema: str = None,
+    dry_run: bool = False,
+    trino_catalog: Optional[str] = None,
+    trino_schema: Optional[str] = None,
 ) -> None:
     """
     Connects to Postgres or Trino via Ibis and computes BMI-for-age Z-scores.
