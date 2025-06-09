@@ -2,12 +2,13 @@ import time
 import uuid
 import ibis
 import numpy as np
-from data.tables import weight_for_age_male_df, weight_for_age_female_df
+from data.tables import *
 import pandas as pd
 pd.options.mode.copy_on_write = True 
 
 from airflow.decorators import task
 from contextlib import closing
+from typing import Optional
 
 # SQL templates for post-processing (only for operations not available in Ibis)
 DROP_NULL_Z_TABLE_SQL = 'ALTER TABLE {0}.{1} ALTER COLUMN measurement_id DROP NOT NULL;'
@@ -62,17 +63,16 @@ def run_cleanup_steps(con, write_database: str, write_table: str) -> None:
     
     table = con.table(write_table, database=write_database)
     table = table.filter([
-        ~table.value_as_number.abs().round() > 1e15, 
-        ~table.value_as_number.isnull(), 
-        ~table.value_as_number.isnan()
+        table.value_as_number.abs().round() <= 1e15,  
+        table.value_as_number.notnull(),      
         ]
     )
     
     with closing(con.raw_sql(BMIZ_DEFAULT_VALUE_AS_NUMBER.format(write_database, write_table))):
         pass
     
-    nan_condition = table.value_as_number.isnan()
-    table.filter(~nan_condition)
+    # nan_condition = table.value_as_number.isnan()
+    # table.filter(~nan_condition)
     print("Cleanup steps completed.")
 
 
@@ -94,8 +94,8 @@ def create_lms_tables(con, site: str, dry_run: bool = False):
     print(f"{'DRY RUN: ' if dry_run else ''}Creating temporary LMS tables...")
     
     # Load hardcoded LMS tables
-    female = weight_for_age_female_df.copy()
-    male = weight_for_age_male_df.copy()
+    female = bmi_for_age_male_df.copy()
+    male = bmi_for_age_male_df.copy()
     
     # Create unique temporary table names
     female_temp = generate_temp_name("female_lms", site)
