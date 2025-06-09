@@ -156,10 +156,10 @@ def perform_lms_lookup(con, meas_table, female_temp: str, male_temp: str, site: 
     # We can reference them without schema qualification in SQL
     lms_lookup_sql = f"""
     WITH lms_union AS (
-        SELECT age, lambda as l, mean as m, sigma as s, gender 
+    SELECT age::NUMERIC, lambda AS l, mean AS m, sigma AS s, gender
         FROM {female_temp}
-        UNION ALL
-        SELECT age, lambda as l, mean as m, sigma as s, gender 
+    UNION ALL
+    SELECT age::NUMERIC, lambda AS l, mean AS m, sigma AS s, gender
         FROM {male_temp}
     ),
     meas_with_bounds AS (
