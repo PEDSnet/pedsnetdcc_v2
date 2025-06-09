@@ -426,23 +426,27 @@ def compute_bmi_zscore_main(
     m = con.table(read_table, database=read_database)
     p = con.table("person", database=read_database)
 
+    # Main query to filter BMI measurements
     meas = (
         m
         .filter([
-            m.measurement_concept_id == measurement_concept_id,
+            m.measurement_concept_id == measurement_concept_id, # BMI Concept ID, '3038553' by default
             m.value_as_number.notnull(),
-            m.unit_concept_id == 9531,
-            m.measurement_type_concept_id == 45754907,
+            m.unit_concept_id == 9531, # kg/m^2 Concept ID
+            m.measurement_type_concept_id == 45754907, # 'Derived' type
+            m.measurement_datetime.notnull(),
         ])
         .inner_join(p, m.person_id == p.person_id)
-        .filter(p.gender_concept_id.isin([8507, 8532]))
+        .filter([
+            p.gender_concept_id.isin([8507, 8532]), # male/female Concept IDs
+            p.birth_datetime.notnull(),
+        ])
         .mutate(
-            bmi_value=m.value_as_number,
-            bmi_source_value=m.value_source_value,
-            age_in_months=(
-                m.measurement_datetime.delta(p.birth_datetime, unit="day") / days_per_month
-            ),
-            gender=ibis.cases(
+            bmi_value    = m.value_as_number,
+            bmi_source_value = m.value_source_value,
+            age_in_months = (m.measurement_datetime.delta(p.birth_datetime, unit="day")
+                            / days_per_month), # Using delta to calculate age in months
+            gender = ibis.cases(
                 (p.gender_concept_id == 8507, "male"),
                 (p.gender_concept_id == 8532, "female"),
                 else_=None
