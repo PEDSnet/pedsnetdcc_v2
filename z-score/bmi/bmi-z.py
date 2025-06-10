@@ -244,11 +244,13 @@ def compute_bmi_zscore_main(
         # 3) If skip_calc, cleanup and return
         if skip_calc:
             # df = con.table(write_table, database=write_database)
-            
+
             # df = df.value_as_number.cast("decimal(20, 10)").name("value_as_number")
-            
+
             # print(f"skip_calc=True: Created and cleaned {write_database}.{write_table}")
-            print(f"skip_calc=True is NOT YET IMPLEMENTED: did not clean {write_database}.{write_table}")
+            print(
+                f"skip_calc=True is NOT YET IMPLEMENTED: did not clean {write_database}.{write_table}"
+            )
             return
 
         # 4) Connect to temporary LMS tables
