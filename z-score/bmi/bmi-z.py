@@ -314,7 +314,9 @@ def compute_bmi_zscore_main(
 
         # 6) Perform LMS lookup and Z-score calculation
         # assume `meas` is your Ibis TableExpr with columns `age_in_months` and `gender`
-        both, l, m, s = lookup_lms_bmi_age_based(con, meas=meas, read_database=read_database)
+        both, l, m, s = lookup_lms_bmi_age_based(
+            con, meas=meas, read_database=read_database
+        )
         print("Performing LMS lookup and Z-score calculation...")
 
         # First attach the LMS parameters to the table
@@ -376,11 +378,21 @@ def compute_bmi_zscore_main(
             print(
                 f"Inserting new Z-score records into {write_database}.{write_table}..."
             )
-            
-            # TODO add to_sql() or compile()
-            con.create_table(
-                write_table, final_expr, database=write_database, overwrite=True
-            )
+
+            try:
+                if compile:
+                    print("\n" + "="*60)
+                    print(f"Final expression for {write_database}.{write_table}:")
+                    print("="*60 + "\n")
+                    print(final_expr.compile(pretty=True))
+                
+                con.create_table(
+                    write_table, final_expr, database=write_database, overwrite=True
+                )
+                print(f"Successfully created table {write_database}.{write_table}")
+            except Exception as e:
+                print(f"Error creating table {write_database}.{write_table}: {e}")
+                print("Continuing with execution...")
 
             end_time = time.time()
 
@@ -389,9 +401,8 @@ def compute_bmi_zscore_main(
             minutes = int((total_seconds % 3600) // 60)
             seconds = total_seconds % 60
             print(
-                f"Inserted new Z-score records in {hours:02d}:{minutes:02d}:{seconds:06.3f}"
+                f"Table creation attempt completed in {hours:02d}:{minutes:02d}:{seconds:06.3f}"
             )
-
 
         print(f"Completed BMI Z-score calculation for site {site}")
 
@@ -460,6 +471,12 @@ if __name__ == "__main__":
         default=os.getenv("SKIP_CALC", "false").lower() == "true",
     )
     parser.add_argument(
+        "--compile",
+        help="Compile the Ibis expression without executing",
+        action="store_true",
+        default=os.getenv("COMPILE", "false").lower() == "true",
+    )
+    parser.add_argument(
         "--trino-catalog", help="Trino catalog name", default=os.getenv("TRINO_CATALOG")
     )
     parser.add_argument(
@@ -479,6 +496,7 @@ if __name__ == "__main__":
     pg_database = args.pg_database
     site = args.site
     skip_calc = args.skip_calc
+    compile_ = args.compile
 
     # Check required arguments based on database backend
     missing_args = []
@@ -551,6 +569,7 @@ if __name__ == "__main__":
         site=site,
         skip_calc=skip_calc,
         db_backend=args.db_backend,
+        compile=compile_,
         trino_catalog=trino_catalog,
         trino_schema=trino_schema,
     )
