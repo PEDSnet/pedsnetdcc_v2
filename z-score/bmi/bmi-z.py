@@ -220,6 +220,7 @@ def compute_bmi_zscore_main(
     write_table: str = "measurement_bmiz_new_approach_ibis",
     days_per_month: float = 30.44,
     skip_calc: bool = False,
+    compile: bool = False,
     db_backend: str = "postgres",
     trino_catalog: Optional[str] = None,
     trino_schema: Optional[str] = None,
