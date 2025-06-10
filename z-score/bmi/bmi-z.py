@@ -38,9 +38,6 @@ def ibis_connection(*args, **kwargs):
         except AttributeError:
             con.con.close()
 
-import ibis
-from ibis import row_number
-
 def lookup_lms_bmi_age_based(con, meas, read_database):
     """
     Look up and linearly interpolate L, M, S for each (age, gender) row in meas
@@ -48,32 +45,25 @@ def lookup_lms_bmi_age_based(con, meas, read_database):
     and upper ages.
     """
     # 1) read & union the LMS tables once
-    lms_f = (
-        con.table("bmi_child_female", database=read_database)
-        .select(
-            age=ibis._.age,
-            gender=ibis.literal("female"),
-            l=ibis._.l,
-            m=ibis._.m,
-            s=ibis._.s,
-        )
+    lms_f = con.table("bmi_child_female", database=read_database).select(
+        age=ibis._.age,
+        gender=ibis.literal("female"),
+        l=ibis._.l,
+        m=ibis._.m,
+        s=ibis._.s,
     )
-    lms_m = (
-        con.table("bmi_child_male", database=read_database)
-        .select(
-            age=ibis._.age,
-            gender=ibis.literal("male"),
-            l=ibis._.l,
-            m=ibis._.m,
-            s=ibis._.s,
-        )
+    lms_m = con.table("bmi_child_male", database=read_database).select(
+        age=ibis._.age,
+        gender=ibis.literal("male"),
+        l=ibis._.l,
+        m=ibis._.m,
+        s=ibis._.s,
     )
     lms = lms_f.union(lms_m)
 
     # 2) LOWER bound branch (age ≤ measurement_age_in_months)
     j_lower = meas.left_join(
-        lms,
-        [(meas.gender == lms.gender) & (lms.age <= meas.age_in_months)]
+        lms, [(meas.gender == lms.gender) & (lms.age <= meas.age_in_months)]
     )
 
     w_lower = dict(
@@ -82,22 +72,17 @@ def lookup_lms_bmi_age_based(con, meas, read_database):
     )
     ranked_lower = j_lower.mutate(rn=row_number().over(**w_lower))
 
-    lower = (
-        ranked_lower
-        .filter(ranked_lower["rn"] == 1)
-        .select(
-            *[ranked_lower[c] for c in meas.columns],
-            ranked_lower["age"].name("lower_age"),
-            ranked_lower["l"].name("l_lo"),
-            ranked_lower["m"].name("m_lo"),
-            ranked_lower["s"].name("s_lo"),
-        )
+    lower = ranked_lower.filter(ranked_lower["rn"] == 1).select(
+        *[ranked_lower[c] for c in meas.columns],
+        ranked_lower["age"].name("lower_age"),
+        ranked_lower["l"].name("l_lo"),
+        ranked_lower["m"].name("m_lo"),
+        ranked_lower["s"].name("s_lo"),
     )
 
     # 3) UPPER bound branch (age ≥ measurement_age_in_months)
     j_upper = meas.left_join(
-        lms,
-        [(meas.gender == lms.gender) & (lms.age >= meas.age_in_months)]
+        lms, [(meas.gender == lms.gender) & (lms.age >= meas.age_in_months)]
     )
 
     w_upper = dict(
@@ -106,16 +91,12 @@ def lookup_lms_bmi_age_based(con, meas, read_database):
     )
     ranked_upper = j_upper.mutate(rn=row_number().over(**w_upper))
 
-    upper = (
-        ranked_upper
-        .filter(ranked_upper["rn"] == 1)
-        .select(
-            *[ranked_upper[c] for c in meas.columns],
-            ranked_upper["age"].name("upper_age"),
-            ranked_upper["l"].name("l_hi"),
-            ranked_upper["m"].name("m_hi"),
-            ranked_upper["s"].name("s_hi"),
-        )
+    upper = ranked_upper.filter(ranked_upper["rn"] == 1).select(
+        *[ranked_upper[c] for c in meas.columns],
+        ranked_upper["age"].name("upper_age"),
+        ranked_upper["l"].name("l_hi"),
+        ranked_upper["m"].name("m_hi"),
+        ranked_upper["s"].name("s_hi"),
     )
 
     # 4) join LOWER + UPPER back together on your measurement key
@@ -131,7 +112,7 @@ def lookup_lms_bmi_age_based(con, meas, read_database):
             "gender",
             "bmi_value",
             "age_in_months",
-        ]
+        ],
     )
 
     # 5) build interpolation CASE expressions
@@ -154,7 +135,6 @@ def lookup_lms_bmi_age_based(con, meas, read_database):
     )
 
     return both, l, m, s
-
 
 
 def calculate_z_scores(meas_with_lms, **kwargs):
