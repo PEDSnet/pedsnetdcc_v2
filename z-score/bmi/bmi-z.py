@@ -326,6 +326,8 @@ def compute_bmi_zscore_main(
 
         # then compute z_score using the table columns
         z = ibis.cases(
+            # Guard against 0^negative_number (which would be division by zero)
+            ((meas_with_lms.bmi_value == 0) & (meas_with_lms.l < 0), ibis.null()),
             (
                 (meas_with_lms.l != 0),
                 ((meas_with_lms.bmi_value / meas_with_lms.m) ** meas_with_lms.l - 1)
